@@ -60,6 +60,32 @@ test.describe('ダッシュボードと画面遷移', () => {
         await expect(card).toContainText('Fake Card Reader');
     });
 
+    /**
+     * **器は表を待たずに出す** (`+page.server.ts` の `gridOf`)。
+     *
+     * 種別のタブ・日送り・検索窓は URL だけで描けるのに、いちばん重い表を待って
+     * いたせいで画面ごと出てこなかった。表だけ後から流すので、最初に届く HTML
+     * には**器と骨組みが入っていて、番組はまだ入っていない**。
+     *
+     * ここを HTML で見るのは、**速さに左右されないため**。描き終わりを目で
+     * 追うと、中身の少ない試験用の番組表では一瞬で埋まってしまう
+     */
+    test('番組表は器を先に返し、表のところだけ読み込み中にする', async ({ request }) => {
+        const res = await request.get('/guide');
+        expect(res.ok()).toBe(true);
+        const html = await res.text();
+        // 器 (種別タブ・日送り・検索窓) は最初の HTML に入っている
+        expect(html).toContain('data-testid="type-tabs"');
+        expect(html).toContain('data-testid="guide-filter"');
+        // 表のところは骨組み。本物の枠はまだ無い
+        expect(html.indexOf('data-testid="guide-skeleton"')).toBeGreaterThan(-1);
+        expect(html.indexOf('data-testid="guide-skeleton"')).toBeLessThan(
+            html.indexOf('data-testid="guide-rows"') === -1
+                ? Number.POSITIVE_INFINITY
+                : html.indexOf('data-testid="guide-rows"'),
+        );
+    });
+
     test('番組表はグリッドで出て、キーワード検索ではリストになる', async ({ page }) => {
         await goto(page, '/guide');
 
@@ -143,7 +169,14 @@ test.describe('ダッシュボードと画面遷移', () => {
         await expect(page.getByTestId('theme-toggle')).toHaveAttribute('data-mode', 'dark');
     });
 
-    test('アクション中はボタンを押せなくし、ローディングを出す', async ({ page }) => {
+    /**
+     * **待ち時間は押したボタンの上に出す。** 画面上端のバーは画面遷移専用
+     * (`actions.ts` の `submitting`)。
+     *
+     * **幅が変わらない**ことも一緒に見る。Pico の `aria-busy` は回るものを文字の
+     * 前に足すのでボタンが横に伸び、行に並んだボタンが隣ごとずれる (`app.scss`)
+     */
+    test('アクション中は押したボタンで回し、ボタンを押せなくする', async ({ page }) => {
         await goto(page, '/');
 
         // 照合は録画の数だけファイルを見に行くので実機では数秒かかる。
@@ -154,14 +187,16 @@ test.describe('ダッシュボードと画面遷移', () => {
         });
 
         const button = page.getByTestId('reconcile-button');
+        const before = await button.boundingBox();
         await button.click();
 
         await expect(button).toBeDisabled();
-        await expect(page.getByTestId('loading-bar')).toHaveAttribute('data-loading', 'true');
+        await expect(button).toHaveAttribute('aria-busy', 'true');
+        expect((await button.boundingBox())?.width).toBeCloseTo(before?.width ?? 0, 1);
 
         await expect(page.getByTestId('reconcile-result')).toBeVisible();
         await expect(button).toBeEnabled();
-        await expect(page.getByTestId('loading-bar')).not.toHaveAttribute('data-loading', 'true');
+        await expect(button).not.toHaveAttribute('aria-busy', 'true');
 
         /*
          * 知らせは右下に浮いていて、自分で閉じられる。
@@ -169,6 +204,78 @@ test.describe('ダッシュボードと画面遷移', () => {
          */
         await page.getByTestId('reconcile-result-close').click();
         await expect(page.getByTestId('reconcile-result')).toHaveCount(0);
+    });
+
+    /**
+     * **読み直しは、走っている遷移を畳んでしまう。**
+     *
+     * SvelteKit は遷移にも `invalidateAll` にも同じ札を使っていて、後から来た
+     * 読み直しが札を書き換えると、行き先を読み終えた遷移はそこで黙って降りる。
+     * **押した先へ行かない** — 番組表を押したのにダッシュボードのまま、になる
+     * (実機で「削除したあと画面が変わらないことがある」として出た。観る画面の
+     * 削除は一覧へ戻る遷移を伴う)。
+     *
+     * 知らせは録画が動いていれば勝手に飛んでくるので、重なるかどうかは運。
+     * ここでは行き先の読み込みを遅らせて窓を作り、その間に知らせを飛ばす
+     * (`reconcile` は `emit('recordings')` する)
+     */
+    test('遷移中に知らせが来ても、押した先へ着く', async ({ page, request }) => {
+        await syncEpg(request);
+        await goto(page, '/');
+
+        await page.route('**/guide/__data.json*', async (route) => {
+            await new Promise((resolve) => setTimeout(resolve, 3000));
+            await route.continue();
+        });
+
+        await page.getByTestId('nav-guide').click();
+        await request.post('/?/reconcile', { form: {} });
+
+        // 畳まれていなければ番組表に着く
+        await expect(page).toHaveURL(/\/guide/);
+        await expect(page.getByTestId('guide-grid')).toBeVisible();
+    });
+
+    /**
+     * **持ち越した読み直しは、遷移が終わったら流れる。**
+     *
+     * 遷移に重ねないよう持ち越す以上、流し忘れたら知らせが一度死ぬ。
+     * 遷移の終わりを `navigating` で見ていると**畳まれた遷移で真のまま残る**ので
+     * 流れない。その遷移が持っている `complete` を見ているのはこのため
+     * ([reload.svelte.ts](../../src/lib/reload.svelte.ts))。
+     *
+     * 番組表は知らせを聞いていない画面なので、2回目の読み込みが来たならそれは
+     * **持ち越しが流れた証拠**にしかならない。
+     *
+     * **サービスワーカーは止める。** 動いていると2回目から先の取得があちら経由に
+     * なり、`page.route` に入ってこないので数えられない (実測: 1回しか数えられず、
+     * 素通りしているのに落ちる)
+     */
+    test.describe('持ち越した読み直し', () => {
+        test.use({ serviceWorkers: 'block' });
+
+        test('遷移中に来た知らせは、着いてから読み直される', async ({ page, request }) => {
+            await syncEpg(request);
+            await goto(page, '/');
+
+            let loads = 0;
+            await page.route('**/guide/__data.json*', async (route) => {
+                // 前日・翌日の先読みは数に入れない (`type` が付く)。数えたいのは
+                // 「いま出している番組表そのもの」の読み込み
+                if (!route.request().url().includes('type=')) loads++;
+                // 1回目だけ遅らせて、知らせが遷移に重なる窓を作る
+                if (loads === 1) await new Promise((resolve) => setTimeout(resolve, 3000));
+                await route.continue();
+            });
+
+            await page.getByTestId('nav-guide').click();
+            await request.post('/?/reconcile', { form: {} });
+
+            await expect(page).toHaveURL(/\/guide/);
+            await expect(page.getByTestId('guide-grid')).toBeVisible();
+            // 着いたあとに、持ち越した読み直しが流れる
+            await expect.poll(() => loads).toBeGreaterThanOrEqual(2);
+        });
     });
 
     test('サーバ側の変化が通知で届く', async ({ page }) => {

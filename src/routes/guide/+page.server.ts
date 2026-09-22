@@ -43,18 +43,34 @@ interface GridProgram extends Program {
 }
 
 /**
- * 番組表は2つの見せ方をする。
- * キーワードなし: 時間×チャンネルのグリッド。並びを眺めて選ぶとき用
- * キーワードあり: 全チャンネル横断のリスト。探しているものが決まっているとき用
+ * 表の中身。**器より後から流す** (SvelteKit の streaming)。
+ *
+ * 種別のタブ・日送り・検索窓は URL だけで描けるのに、いちばん重い表を待って
+ * いたせいで**画面ごと出てこなかった**。器を先に出して、表のところだけ
+ * 読み込み中にしておけば、放送波を選び直すのも検索を打ち始めるのも待たずにできる。
+ *
+ * **一度譲ってから引く。** SQLite の読みは同期なので、譲らずに引くと `load` が
+ * 返る前に引き終わり、器だけ先に出す意味が無くなる (後から流れるのは、`load` が
+ * 返った時点でまだ片が付いていない promise だけ)。
+ *
+ * **転んでも投げ返さない。** 流して返すぶんの拒否は `load` の外で起きるので
+ * SvelteKit のエラー画面にはならず、受け損ねると骨組みのまま永久に止まる。
+ * そのうえ**拾い手のいない拒否**になって画面と関係のないところで落ちる —
+ * 画面側で受けようにも、拒否は器を組むより先に届くことがあり、先読みしたぶん
+ * (前日・翌日) に至っては誰も読まない。**理由を中身として返す**ほうが確実で、
+ * 本当の理由もサーバのログに残せる (画面へ渡るのは短い一行だけ)
  */
-export async function load({ url }) {
-    const type = (TYPES.find((t) => t === url.searchParams.get('type')) ?? 'GR') as ChannelType;
+async function gridOf(type: ChannelType, start: number, end: number) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    try {
+        return readGrid(type, start, end);
+    } catch (error) {
+        console.error('[guide] 番組表を組めませんでした', error);
+        return { programs: [], services: [], failed: String(error) };
+    }
+}
 
-    // 既定は今日の放送日。めくるときだけ start が付く
-    const requested = Number(url.searchParams.get('start'));
-    const start = broadcastDayStart(Number.isFinite(requested) && requested > 0 ? requested : Date.now());
-    const end = start + WINDOW_HOURS * HOUR;
-
+function readGrid(type: ChannelType, start: number, end: number) {
     // テレビと同じ並びにする (SERVICE_ORDER)。
     // 取り残しの局は出さない (CURRENT_SERVICES)。出すと番組表に空の列が並ぶ
     const services: Service[] = orm()
@@ -94,17 +110,37 @@ export async function load({ url }) {
         .orderBy(p.start_at)
         .all();
 
-    // 詳細の「視聴」を出すかどうか。決め方はライブ画面と揃えてある (watchableServices)
-    const watchable = watchableServices(Date.now());
+    return {
+        programs,
+        // 放送していない局は出さない (終わったチャンネル・相乗り中のサブチャンネル)
+        services: airing(services, programs),
+        /** 組めなかった理由。組めていれば null */
+        failed: null as string | null,
+    };
+}
+
+/**
+ * 番組表は2つの見せ方をする。
+ * キーワードなし: 時間×チャンネルのグリッド。並びを眺めて選ぶとき用
+ * キーワードあり: 全チャンネル横断のリスト。探しているものが決まっているとき用
+ */
+export function load({ url }) {
+    const type = (TYPES.find((t) => t === url.searchParams.get('type')) ?? 'GR') as ChannelType;
+
+    // 既定は今日の放送日。めくるときだけ start が付く
+    const requested = Number(url.searchParams.get('start'));
+    const start = broadcastDayStart(Number.isFinite(requested) && requested > 0 ? requested : Date.now());
+    const end = start + WINDOW_HOURS * HOUR;
 
     return {
+        // ここまでが器。URL と設定だけで決まるので、表を待たずに描ける
         type,
         start,
         hours: WINDOW_HOURS,
-        programs,
-        watchable,
-        // 放送していない局は出さない (終わったチャンネル・相乗り中のサブチャンネル)
-        services: airing(services, programs),
+        // 詳細の「視聴」を出すかどうか。決め方はライブ画面と揃えてある (watchableServices)
+        watchable: watchableServices(Date.now()),
+        /** 表の中身。**promise のまま渡して、後から流す** */
+        grid: gridOf(type, start, end),
     };
 }
 

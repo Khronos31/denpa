@@ -1,19 +1,26 @@
 <script lang="ts">
     import '../app.scss';
     import { onMount } from 'svelte';
-    import { invalidateAll } from '$app/navigation';
-    import { navigating, page } from '$app/state';
-    import { busy } from '$lib/busy.svelte';
+    import { page } from '$app/state';
     import Measure from '$lib/components/Measure.svelte';
     import Icon from '$lib/components/player/Icon.svelte';
     import { write } from '$lib/keep';
     import { measure } from '$lib/measure.svelte';
     import { startOffline } from '$lib/offline.svelte';
+    import { followNavigation, reload } from '$lib/reload.svelte';
 
     let { children, data } = $props();
 
     // オフライン視聴の控えを読み、オンラインに戻ったら outbox を流す (docs/offline.md)
     onMount(() => startOffline());
+
+    /*
+     * 画面遷移の終わりを自前で見る。**`navigating` は畳まれた遷移で真のまま残る**
+     * ので、あれを当てにすると「遷移が終わったら流す」が永久に来ない (理由は
+     * [reload.svelte.ts](../lib/reload.svelte.ts))。土台は画面遷移で作り直されない
+     * ので、ここで1度追い始めれば全部の遷移を見ていられる
+     */
+    followNavigation();
 
     /**
      * **その端末の高さを読む札。**
@@ -97,7 +104,7 @@
     onMount(() => {
         const refresh = () => {
             if (document.visibilityState !== 'visible') return;
-            void invalidateAll();
+            reload();
         };
         const restored = (event: PageTransitionEvent) => {
             if (event.persisted) refresh();
@@ -299,19 +306,6 @@
             {/if}
         </nav>
 
-        <!--
-            画面遷移とフォーム送信の待ち時間を出す。番組表やEPG取得は数秒かかることがあり、
-            無反応に見えると二度押しされる。ヘッダーの下端に重ねて、隙間ができないようにする
-        -->
-        <div
-            class="loading-bar"
-            data-testid="loading-bar"
-            data-loading={navigating.to || busy.active ? 'true' : undefined}
-        >
-            {#if navigating.to || busy.active}
-                <progress></progress>
-            {/if}
-        </div>
     </div>
 
     <main>
@@ -442,21 +436,6 @@
     }
     ul.burger-list a[aria-current='page'] {
         background: var(--dp-base-300);
-    }
-    .loading-bar {
-        position: absolute;
-        left: 0;
-        right: 0;
-        bottom: -0.25rem;
-        height: 0.25rem;
-        line-height: 0;
-    }
-    .loading-bar progress {
-        display: block;
-        width: 100%;
-        height: 0.25rem;
-        margin: 0;
-        border-radius: 0;
     }
     main {
         padding: 1rem;
