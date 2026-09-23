@@ -10,8 +10,9 @@ using Microsoft.AspNetCore.Http.Features;
  * denpa から触れないものが3つある。
  *
  * - B-CASカード … pcscd 経由でしか読めず、その pcscd はこのコンテナにしか居ない
- * - チューナーデバイス … `/dev/dvb/*` が見えているのはこちらだけ
- * - 選局そのもの … デバイスを掴んで ioctl で選局する (Tuning.cs)
+ * - チューナーデバイス … `/dev/dvb/*` と `/dev/bus/usb` が見えているのはこちらだけ
+ * - 選局そのもの … デバイスを掴んで ioctl で選局する (Tuning.cs)。PX-Q3U4 は
+ *   同梱の px4-userland に USB を叩かせる (Q3u4.cs)
  *
  * **中身は読まない。** NIT も SDT も EIT も解かず、TS をそのまま流す。
  * 読むのは denpa (`src/lib/ts`) で、局を選り分けるのも番組表を組み立てるのも、
@@ -256,6 +257,8 @@ app.MapPut("/denpa/tuners", async (HttpContext http) =>
     var (resolved, auto) = config.ResolveTuners();
     pool.Detected = auto;
     pool.Replace(resolved);
+    // 新しく書かれた Q3U4 があれば px4d を起こしてカードリーダーも繋ぐ。数秒かかるので返事は待たせない
+    _ = Task.Run(() => Px4Daemon.Prepare(resolved));
     await Respond.Write(http, new JsonObject { ["tuners"] = pool.Status(), ["detected"] = pool.Detected });
 });
 
@@ -356,6 +359,15 @@ app.MapFallback((HttpContext http) =>
 await Card.EnsurePcscd();
 
 /*
+ * **PX-Q3U4 の px4d は背景で起こす。** ready までファームウェアの流し込みで
+ * 数秒、駄目な筐体なら 30 秒待つので、ここで待つと HTTP の口 (= PT3 など他の
+ * チューナーの提供) まで遅れる。内蔵カードリーダーは px4d が ready になった
+ * ときに reader.conf を書いて `pcscd --hotplug` で読み直させるので、pcscd が
+ * 先に居ても困らない (Q3u4.cs)。筐体が無ければ何もしない
+ */
+_ = Task.Run(() => Px4Daemon.Prepare(pool.Tuners));
+
+/*
  * **畳むのは、流し終えてから。**
  *
  * ここを `ApplicationStopping` でやっていた頃は、止まれの合図を受けたその場で
@@ -366,7 +378,12 @@ await Card.EnsurePcscd();
  * (その上限が上の `ShutdownTimeout`)。読み手が居なくなってから離せば、
  * 録画は最後まで届く。
  */
-app.Lifetime.ApplicationStopped.Register(pool.CloseAll);
+app.Lifetime.ApplicationStopped.Register(() =>
+{
+    pool.CloseAll();
+    // 読み手を全部離してから px4d を止める。SIGTERM で LNB を 0V に戻して終わる
+    Px4Daemon.StopAll();
+});
 
 Log.Write($"listening on :{port} (tuners: {config.TunersFile} / channels: {config.ChannelsFile})");
 Log.Write($"チューナー {pool.Tuners.Count} 本 / チャンネル {config.LoadChannels().Count} 件");
