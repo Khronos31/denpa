@@ -72,7 +72,8 @@ internal sealed class ChildTs(string name, string program)
 
     /// <summary>
     /// 子の標準出力の fd。.NET 10 の Unix では <c>AnonymousPipeClientStream</c>。
-    /// 閉じるのは <see cref="Process"/> 側。こちらが閉じると読み口が二重に閉じる。
+    /// 閉じるのは <c>process.StandardOutput</c> を閉じたとき (<see cref="Drop"/>)。
+    /// こちらが閉じると読み口が二重に閉じる。
     /// </summary>
     internal static SafeFileHandle StdoutHandle(Process process)
     {
@@ -189,6 +190,12 @@ internal sealed class ChildTs(string name, string program)
         var rest = ReaderDrain - stopped.Elapsed;
         if (stream is not null && rest > TimeSpan.Zero) Thread.Sleep(rest);
         stream?.Dispose();
+        /*
+         * **標準出力は自分で閉じる。** StandardOutput に触った (同期読みにした) 子は、
+         * Process.Dispose が標準出力の pipe を閉じない。GC まで fd が1つずつ残り、
+         * 選局のたびに増える (.NET 10 で 50 回起こして 54 本残った)
+         */
+        process.StandardOutput.Dispose();
         process.Dispose();
     }
 }
