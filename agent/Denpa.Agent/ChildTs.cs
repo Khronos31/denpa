@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.IO.Pipes;
 using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 
 namespace Denpa.Agent;
 
@@ -69,6 +71,21 @@ internal sealed class ChildTs(string name, string program)
     public bool Alive => _stream is not null && _child is { Process.HasExited: false };
 
     /// <summary>
+    /// 子の標準出力の fd。.NET 10 の Unix では <c>AnonymousPipeClientStream</c>。
+    /// 閉じるのは <see cref="Process"/> 側。こちらが閉じると読み口が二重に閉じる。
+    /// </summary>
+    internal static SafeFileHandle StdoutHandle(Process process)
+    {
+        var stream = process.StandardOutput.BaseStream;
+        if (stream is FileStream file) return file.SafeFileHandle;
+        if (stream is PipeStream pipe)
+        {
+            return new SafeFileHandle(pipe.SafePipeHandle.DangerousGetHandle(), ownsHandle: false);
+        }
+        throw new IOException($"子の標準出力を掴めません ({stream.GetType().Name})");
+    }
+
+    /// <summary>
     /// 子を起こして同期を待つ。前の子が居れば先に止める。
     /// 同期しなければ理由を添えて投げる (子は止めてある)
     /// </summary>
@@ -92,7 +109,7 @@ internal sealed class ChildTs(string name, string program)
             }
         });
 
-        var handle = ((FileStream)process.StandardOutput.BaseStream).SafeFileHandle;
+        var handle = StdoutHandle(process);
         var fd = (int)handle.DangerousGetHandle();
         if (Sys.Fcntl(fd, Sys.SetPipeSize, PipeSize) < 0 && Sys.Fcntl(fd, Sys.SetPipeSize, FallbackPipeSize) < 0)
         {
