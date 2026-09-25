@@ -81,6 +81,24 @@ public sealed unsafe partial class AribB25
         /// <summary>鍵が変わる周期より短くする。長く持つと古い鍵を配る</summary>
         private static readonly TimeSpan CacheFor = TimeSpan.FromSeconds(3);
 
+        /// <summary>
+        /// 開いていたカードを捨てる。**pcscd を入れ直したあと** (Card.RestartPcscd)。
+        /// libaribb25 は繋ぎ直さないので、次に要ったときに開き直す
+        /// </summary>
+        public static void Forget()
+        {
+            lock (Gate)
+            {
+                if (_card is null) return;
+                _card->Release(_card);
+                _card = null;
+            }
+        }
+
+        /// <summary>
+        /// 開いているカード。**<see cref="Gate"/> を握ったまま呼び、使い終わるまで放さない。**
+        /// 取ってから放すと、その間に <see cref="Forget"/> が解放したものを使うことになる
+        /// </summary>
         private static CasCard* Card()
         {
             lock (Gate)
@@ -102,10 +120,10 @@ public sealed unsafe partial class AribB25
 
         public static CardInit Init()
         {
-            var card = Card();
             var status = default(InitStatus);
             lock (Gate)
             {
+                var card = Card();
                 if (card->GetInitStatus(card, &status) < 0) throw new IOException("カードの状態を読めません");
             }
 
@@ -119,10 +137,10 @@ public sealed unsafe partial class AribB25
 
         private static long[] LocalIds()
         {
-            var card = Card();
             var id = default(CardId);
             lock (Gate)
             {
+                var card = Card();
                 if (card->GetId(card, &id) < 0 || id.Data is null) return [];
                 var found = new long[id.Count];
                 for (var at = 0; at < id.Count; at++) found[at] = id.Data[at];
@@ -139,11 +157,11 @@ public sealed unsafe partial class AribB25
                 return (cached.Key, cached.Code);
             }
 
-            var card = Card();
             var result = default(EcmResult);
             int code;
             lock (Gate)
             {
+                var card = Card();
                 fixed (byte* source = ecm)
                 {
                     code = card->ProcEcm(card, &result, source, ecm.Length);
