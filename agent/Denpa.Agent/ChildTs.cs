@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.IO.Pipes;
 using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 
 namespace Denpa.Agent;
 
@@ -69,6 +71,22 @@ internal sealed class ChildTs(string name, string program)
     public bool Alive => _stream is not null && _child is { Process.HasExited: false };
 
     /// <summary>
+    /// 子の標準出力の fd。.NET 10 の Unix では <c>AnonymousPipeClientStream</c>。
+    /// 閉じるのは <c>process.StandardOutput</c> を閉じたとき (<see cref="Drop"/>)。
+    /// こちらが閉じると読み口が二重に閉じる。
+    /// </summary>
+    internal static SafeFileHandle StdoutHandle(Process process)
+    {
+        var stream = process.StandardOutput.BaseStream;
+        if (stream is FileStream file) return file.SafeFileHandle;
+        if (stream is PipeStream pipe)
+        {
+            return new SafeFileHandle(pipe.SafePipeHandle.DangerousGetHandle(), ownsHandle: false);
+        }
+        throw new IOException($"子の標準出力を掴めません ({stream.GetType().Name})");
+    }
+
+    /// <summary>
     /// 子を起こして同期を待つ。前の子が居れば先に止める。
     /// 同期しなければ理由を添えて投げる (子は止めてある)
     /// </summary>
@@ -92,7 +110,7 @@ internal sealed class ChildTs(string name, string program)
             }
         });
 
-        var handle = ((FileStream)process.StandardOutput.BaseStream).SafeFileHandle;
+        var handle = StdoutHandle(process);
         var fd = (int)handle.DangerousGetHandle();
         if (Sys.Fcntl(fd, Sys.SetPipeSize, PipeSize) < 0 && Sys.Fcntl(fd, Sys.SetPipeSize, FallbackPipeSize) < 0)
         {
@@ -172,6 +190,12 @@ internal sealed class ChildTs(string name, string program)
         var rest = ReaderDrain - stopped.Elapsed;
         if (stream is not null && rest > TimeSpan.Zero) Thread.Sleep(rest);
         stream?.Dispose();
+        /*
+         * **標準出力は自分で閉じる。** StandardOutput に触った (同期読みにした) 子は、
+         * Process.Dispose が標準出力の pipe を閉じない。GC まで fd が1つずつ残り、
+         * 選局のたびに増える (.NET 10 で 50 回起こして 54 本残った)
+         */
+        process.StandardOutput.Dispose();
         process.Dispose();
     }
 }
