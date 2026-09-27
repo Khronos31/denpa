@@ -28,7 +28,7 @@ import type { AudioTrack } from './arib';
  * ([stream.md](../../docs/stream.md) §5.1)
  *
  * **生 (MPEG-2 のまま) はここに並べない。** 焼き方ではなく「焼かない」なので、
- * 端末の設定 (`raw/setting.svelte.ts`) で別に選ぶ
+ * 画質の切り替えの末尾に別に並べる (`CodecMenu` の `onraw`)
  * (`TuneCommand.raw`。[stream.md](../../docs/stream.md) §5.5)
  */
 export type LiveCodec = 'h264' | 'av1';
@@ -278,7 +278,7 @@ export type TuneCommand = {
     /**
      * **焼かずに生の TS で欲しい** ([stream.md](../../docs/stream.md) §5.5)。
      *
-     * 端末の設定 (既定は切) とブラウザが解けるか (`raw/support.ts`) で画面が決める。
+     * 画質の切り替えで MPEG-2 を選び (`CodecMenu` の `onraw`)、ブラウザが解ける (`raw/support.ts`) ときに画面が頼む。
      * 生で送ると音声は画面が選ぶので、`audio` は選び直しても焼き直しにならない
      */
     raw?: boolean;
