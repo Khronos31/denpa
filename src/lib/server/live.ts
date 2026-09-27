@@ -44,7 +44,6 @@ import { orm } from './db';
 import { deinterlace } from './encoder';
 import { programs, recordings, services } from './schema';
 import { chunks, lines } from './stream';
-import type { Grant } from './tickets';
 import { openWhenFree } from './tuner';
 import type { Connection } from './ws';
 
@@ -1308,7 +1307,7 @@ export function warm(
     audio?: string,
     codec: LiveCodec = 'h264',
     /**
-     * 生で温めるか。**LAN から来ていて、前回も生で見ていたときだけ** (呼ぶ側が決める)。
+     * 生で温めるか。**前回も生で見ていたときだけ** (呼ぶ側が決める)。
      * 生は ffmpeg を待たないぶん削れるのはチューナーの掴みだけだが、それでも 160ms は重なる
      */
     raw = false,
@@ -1343,7 +1342,7 @@ type Asked =
           audio: string | undefined;
           codec: LiveCodec;
           caption: number;
-          /** 生で欲しいと言われたか。**許すかは札で決まる** (`attend`) */
+          /** 生で欲しいと言われたか */
           raw: boolean;
       }
     | ChaseAsked;
@@ -1412,7 +1411,7 @@ function parseCommand(message: Record<string, unknown>): Asked | null {
  * 接続そのものが在席の印になる (`stream.md` §4「入っているもの」の畳み方)。
  * HTTP のストリームだと切断の検出が遅れるが、WebSocket なら閉じた時点で分かる。
  */
-export function attend(connection: Connection, grant: Grant = { raw: false }): void {
+export function attend(connection: Connection): void {
     const viewer: Viewer = { connection, ready: false, wantsData: false };
     let current: Session | null = null;
 
@@ -1448,8 +1447,7 @@ export function attend(connection: Connection, grant: Grant = { raw: false }): v
         const { channelType, channel, serviceId, audio, codec, caption } = asked;
 
         const now = nowPlaying(serviceId, audio);
-        // **生で送るのは、頼まれて、しかも札が許しているときだけ** (LAN から取った札。`tickets.Grant`)
-        const raw = asked.raw && grant.raw;
+        const raw = asked.raw;
 
         /*
          * **同じものを焼いているなら、焼き直さない。**
